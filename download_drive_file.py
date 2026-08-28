@@ -1,4 +1,5 @@
 import asyncio
+import time
 import urllib.parse
 import urllib.request
 import shutil
@@ -11,6 +12,17 @@ from playwright.async_api import async_playwright
 
 if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
+
+def get_ffmpeg_path():
+    """Gets the path to ffmpeg, preferring the PyInstaller bundled version if available."""
+    # If running as a PyInstaller bundle, look in the extracted _MEIPASS directory
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        bundled_ffmpeg = os.path.join(sys._MEIPASS, 'ffmpeg.exe')
+        if os.path.exists(bundled_ffmpeg):
+            return bundled_ffmpeg
+            
+    # Otherwise, fall back to checking the system's PATH
+    return shutil.which("ffmpeg")
 
 def force_close_browser(browser_channel):
     """Kills all background browser processes so Playwright can safely access the profile."""
@@ -29,8 +41,8 @@ def force_close_browser(browser_channel):
         # Give it a second to clean up process locks
         import time
         time.sleep(1)
-    except Exception:
-        pass
+    except Exception as error:
+        sys.stderr.write(f"{error}\n")
 
 async def get_video_urls_and_cookies(file_url, user_data_dir, browser_channel):
     force_close_browser(browser_channel)
@@ -52,12 +64,13 @@ async def get_video_urls_and_cookies(file_url, user_data_dir, browser_channel):
                 args=["--disable-blink-features=AutomationControlled"],
                 user_agent=user_agent
             )
+            print("Launching browser...")
         except Exception as e:
             print(f"❌ Failed to launch browser: {e}")
             print(f"Please check if {browser_channel} is installed and the profile directory '{user_data_dir}' is valid and accessible.")
             return None, None, None
             
-        page = context.pages[0]
+        page = await context.new_page()
 
         def handle_request(request):
             url = request.url
@@ -72,6 +85,12 @@ async def get_video_urls_and_cookies(file_url, user_data_dir, browser_channel):
                 full_url = re.sub(r'&range=[^&]*', '', url)
                 full_url = re.sub(r'\?range=[^&]*&', '?', full_url)
                 full_url = re.sub(r'\?range=[^&]*$', '', full_url)
+                
+                # Also remove chunking parameters so we get a raw video file instead of a protobuf stream
+                for param in ['alr', 'rn', 'rbuf', 'ump']:
+                    full_url = re.sub(rf'&{param}=[^&]*', '', full_url)
+                    full_url = re.sub(rf'\?{param}=[^&]*&', '?', full_url)
+                    full_url = re.sub(rf'\?{param}=[^&]*$', '', full_url)
                 
                 # Overwrite with the latest requested URLs 
                 # (so we get the 1080p ones after switching quality)
@@ -178,13 +197,13 @@ async def get_video_urls_and_cookies(file_url, user_data_dir, browser_channel):
 
 async def main():
     parser = argparse.ArgumentParser(description="Download Google Drive video in highest quality.")
-    parser.add_argument("url", nargs="?", default="https://drive.google.com/file/d/1EG7hhxWLw4rg1krBKebmk9wu23tvt1Yr/view?usp=drive_link", help="Google Drive File URL")
+    parser.add_argument("url", metavar="drive url", nargs=1, help="Google Drive File URL")
     parser.add_argument("--profile-dir", help="Path to browser profile directory (optional)")
     parser.add_argument("--browser", choices=["msedge", "chrome"], help="Browser to use (msedge or chrome) (optional)")
     parser.add_argument("--download-dir", default="./downloads", help="Directory to save downloads")
     args = parser.parse_args()
 
-    DRIVE_FILE_URL = args.url
+    DRIVE_FILE_URL = args.url[0]
     DOWNLOAD_DIR = args.download_dir
     browser_channel = args.browser
     profile_dir = args.profile_dir
@@ -218,10 +237,12 @@ async def main():
     print(f"Profile Directory: {profile_dir}")
     print(f"Download Directory: {DOWNLOAD_DIR}")
     
-    if not shutil.which("ffmpeg"):
-        print("\n⚠️  WARNING: ffmpeg not found in PATH!")
+    ffmpeg_path = get_ffmpeg_path()
+    if not ffmpeg_path:
+        print("\n⚠️  WARNING: ffmpeg not found!")
         print("Merging audio and video will not be possible without ffmpeg.")
-        print("Please install ffmpeg before running this script if you need audio and video merged.")
+        print("Please ensure ffmpeg is bundled or installed if you need audio and video merged.")
+        time.sleep(3)
     
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     
@@ -301,8 +322,8 @@ async def main():
     # 3. Merge them using ffmpeg
     if "video" in urls and "audio" in urls:
         if os.path.exists(video_temp) and os.path.exists(audio_temp):
-            if not shutil.which("ffmpeg"):
-                print("\n❌ ffmpeg is not installed. Both video and audio downloaded but cannot merge.")
+            if not ffmpeg_path:
+                print("\n❌ ffmpeg is not installed or bundled. Both video and audio downloaded but cannot merge.")
                 print(f"Video file: {video_temp}")
                 print(f"Audio file: {audio_temp}")
                 return
@@ -310,7 +331,7 @@ async def main():
             print("\nMerging video and audio with ffmpeg...")
             try:
                 subprocess.run([
-                    "ffmpeg", "-y",
+                    ffmpeg_path, "-y",
                     "-i", video_temp,
                     "-i", audio_temp,
                     "-c:v", "copy",
