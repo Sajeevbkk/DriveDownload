@@ -1,113 +1,159 @@
 # Google Drive Video Downloader
 
-This script automates the process of downloading the highest quality video and audio streams from a Google Drive video link and merges them into a single file using `ffmpeg`. It uses Microsoft Edge or Google Chrome to handle the authentication and capture the streams dynamically.
+A high-performance tool that automates downloading the highest quality video and audio streams from Google Drive video links and merges them seamlessly into a single `.mp4` file using `ffmpeg`.
 
-## Prerequisites
-
-Before running the script, you need to ensure you have the following installed on your system:
-1. **Python** (Version 3.8 or higher)
-2. **ffmpeg** (Used for merging video and audio)
-3. **Microsoft Edge** or **Google Chrome** browser
+It uses your local browser session (Microsoft Edge or Google Chrome) to handle authentication, ensuring access to private, restricted, or view-only Google Drive files without requiring API keys or OAuth credentials.
 
 ---
 
-## Installation & Setup
+## Features
 
-### For Windows
+- **Highest Quality Selection**: Automatically selects 1080p (or maximum available resolution) from Google Drive's player.
+- **Standalone Executable**: Bundled with `ffmpeg` and Playwright drivers into a portable `.exe` using PyInstaller.
+- **Session Re-use**: Leverages your logged-in browser session to download files you have access to.
+- **Auto-Merge**: Downloads separated video and audio streams natively and merges them losslessly into a final `.mp4`.
 
-1. **Install Python:**
-   - Download Python from [python.org](https://www.python.org/downloads/windows/).
-   - During installation, **ensure you check the box that says "Add Python to PATH"**.
+---
 
-2. **Install ffmpeg:**
-   - Download the latest `ffmpeg` build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (choose the `ffmpeg-release-essentials.zip`).
-   - Extract the `.zip` file.
-   - Rename the extracted folder to `ffmpeg` and move it to your `C:\` drive (e.g., `C:\ffmpeg`).
-   - Add `ffmpeg` to your system PATH:
-     - Press the `Windows Key`, type **Environment Variables**, and select **Edit the system environment variables**.
-     - Click **Environment Variables...** at the bottom.
-     - Under **System variables**, find and select `Path`, then click **Edit**.
-     - Click **New** and add the path to the ffmpeg bin folder (e.g., `C:\ffmpeg\bin`).
-     - Click **OK** to save and close all windows.
+## 🚀 Quick Start (Running the Compiled Executable)
 
-3. **Install Script Dependencies:**
-   Open a terminal (Command Prompt or PowerShell) and run the following commands:
+If you are using the compiled binary (`download_drive_file.exe`), you **do not need Python or ffmpeg installed**.
+
+### Prerequisites
+1. **Operating System**: Windows 10/11 (64-bit).
+2. **Browser**: Microsoft Edge (built-in) or Google Chrome.
+3. **Google Account**: Ensure you are logged into Google in your browser so the tool can access the file.
+
+### How to Run
+
+1. Open **Command Prompt** or **PowerShell**.
+2. Navigate to the folder containing `download_drive_file.exe`:
+   ```cmd
+   cd path\to\dist
+   ```
+3. Run the executable with your Google Drive video URL:
+   ```cmd
+   download_drive_file.exe "YOUR_GOOGLE_DRIVE_VIDEO_URL"
+   ```
+
+**Example:**
+```cmd
+download_drive_file.exe "https://drive.google.com/file/d/1EG7hhxWLw4rg1krBKebmk9wu23tvt1Yr/view?usp=drive_link"
+```
+
+The final video will be saved to the `./downloads` folder by default.
+
+---
+
+## 🛠️ Building the Executable from Source (PyInstaller)
+
+If you want to compile the project yourself into a standalone `.exe`:
+
+### 1. Prerequisites
+- **Python 3.8+** installed ([python.org](https://www.python.org/)) with **"Add Python to PATH"** checked.
+- Place `ffmpeg.exe` in the root folder of the project.
+
+### 2. Install Build Dependencies
+```cmd
+pip install playwright pyinstaller
+playwright install chromium
+```
+
+### 3. Build with PyInstaller
+Run the build using the provided `.spec` file:
+```cmd
+pyinstaller download_drive_file.spec
+```
+
+Once the build finishes, your standalone executable will be generated at:
+```
+dist/download_drive_file.exe
+```
+
+---
+
+## 🐍 Running from Python Source
+
+If you prefer running directly from source code without compiling:
+
+### Windows Setup
+
+1. **Install Dependencies:**
    ```cmd
    pip install playwright
    playwright install chromium
    ```
 
-### For Ubuntu (Linux)
+2. **Ensure ffmpeg is available:**
+   - Either place `ffmpeg.exe` in the project root directory, or add `ffmpeg` to your system PATH.
 
-1. **Install Python and pip:**
-   Open your terminal and run:
+3. **Run the script:**
+   ```cmd
+   python download_drive_file.py "YOUR_GOOGLE_DRIVE_VIDEO_URL"
+   ```
+
+### Linux (Ubuntu) Setup
+
+1. **Install System Dependencies & ffmpeg:**
    ```bash
    sudo apt update
-   sudo apt install python3 python3-pip python3-venv
+   sudo apt install python3 python3-pip python3-venv ffmpeg
    ```
 
-2. **Install ffmpeg:**
-   Run the following command to install `ffmpeg`:
-   ```bash
-   sudo apt install ffmpeg
-   ```
-
-3. **Install Google Chrome (if not already installed):**
+2. **Install Google Chrome (if not installed):**
    ```bash
    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
    sudo apt install ./google-chrome-stable_current_amd64.deb
    ```
 
-4. **Install Script Dependencies:**
-   In your terminal, navigate to the folder containing this script and run:
+3. **Install Python Packages:**
    ```bash
    pip3 install playwright
    playwright install chromium
    ```
 
+4. **Run the script:**
+   ```bash
+   python3 download_drive_file.py "YOUR_GOOGLE_DRIVE_VIDEO_URL"
+   ```
+
 ---
 
-## How to Run the Script
+## ⚙️ Command Line Options & Flags
 
-Before running the script, make sure you are logged into your Google account in your browser (Edge on Windows, or Chrome on Ubuntu). This allows the script to access the Google Drive video without permission issues.
+You can customize the downloader using optional command-line flags:
 
-### Running on Windows
-Open Command Prompt or PowerShell, navigate to the folder where the script is located, and run:
+| Flag | Description | Default |
+|------|-------------|---------|
+| `url` | *(Required)* The Google Drive video file link | - |
+| `--browser` | Specify browser engine (`msedge` or `chrome`) | `msedge` (Windows) / `chrome` (Linux) |
+| `--download-dir` | Directory to save the final video | `./downloads` |
+| `--profile-dir` | Custom path to browser user profile | Auto-detected system profile path |
 
-```cmd
-python download_drive_file.py "YOUR_GOOGLE_DRIVE_VIDEO_URL"
-```
+### Examples with Options
 
-**Example:**
-```cmd
-python download_drive_file.py "https://drive.google.com/file/d/1EG7hhxWLw4rg1krBKebmk9wu23tvt1Yr/view?usp=drive_link"
-```
+- **Specify download folder:**
+  ```cmd
+  download_drive_file.exe "YOUR_URL" --download-dir "D:\MyVideos"
+  ```
 
-### Running on Ubuntu
-Open your terminal, navigate to the folder where the script is located, and run:
+- **Use Google Chrome instead of Edge:**
+  ```cmd
+  download_drive_file.exe "YOUR_URL" --browser chrome
+  ```
 
-```bash
-python3 download_drive_file.py "YOUR_GOOGLE_DRIVE_VIDEO_URL"
-```
+- **Use custom browser profile directory:**
+  ```cmd
+  download_drive_file.exe "YOUR_URL" --profile-dir "C:\Users\username\AppData\Local\Google\Chrome\User Data"
+  ```
 
-### Additional Options
+---
 
-The script will automatically detect your operating system and use the default browser (Edge for Windows, Chrome for Linux). However, you can customize its behavior using the following optional flags:
+## 💡 Troubleshooting & Notes
 
-- `--browser`: Specify the browser to use (`msedge` or `chrome`).
-- `--profile-dir`: Provide a custom path to your browser's User Data profile directory.
-- `--download-dir`: Specify a custom folder to save the final video (default is `./downloads`).
-
-**Example of using optional flags:**
-```bash
-python3 download_drive_file.py "YOUR_URL_HERE" --browser chrome --download-dir "/path/to/save/videos"
-```
-
-## Troubleshooting
-
-- **The script crashes immediately or says "Failed to launch browser":**
-  Ensure you have closed all running instances of your browser before running the script.
-- **ffmpeg not found warning:**
-  The script successfully downloaded the video and audio, but failed to merge them because `ffmpeg` is not properly installed or not added to your system PATH.
-- **Permission Denied / URL Not Captured:**
-  Ensure you have opened your browser normally and logged into the Google account that has access to the Drive file. The script borrows your login session.
+- **Browser Closes Automatically:**
+  Playwright requires exclusive access to the browser user profile. The script will automatically close active background browser processes before launching.
+- **Permission Denied / URL Not Intercepted:**
+  Ensure you are logged into the Google Account that has view/download permissions for the target file in your selected browser.
+- **Temporary Files:**
+  The separate `video.mp4` and `audio.mp4` streams are downloaded temporarily and automatically merged and cleaned up after creating `final_video.mp4`.
