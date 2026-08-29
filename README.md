@@ -2,7 +2,7 @@
 
 A high-performance tool that automates downloading the highest quality video and audio streams from Google Drive video links and merges them seamlessly into a single `.mp4` file using `ffmpeg`.
 
-It uses your local browser session (Microsoft Edge or Google Chrome) to handle authentication, ensuring access to private, restricted, or view-only Google Drive files without requiring API keys or OAuth credentials.
+It uses your local browser session to handle authentication, ensuring access to private, restricted, or view-only Google Drive files without requiring API keys or OAuth credentials.
 
 ---
 
@@ -10,7 +10,6 @@ It uses your local browser session (Microsoft Edge or Google Chrome) to handle a
 
 - **Highest Quality Selection**: Automatically selects 1080p (or maximum available resolution) from Google Drive's player.
 - **Standalone Executable**: Bundled with `ffmpeg` and Playwright drivers into a portable `.exe` using PyInstaller.
-- **Session Re-use**: Leverages your logged-in browser session to download files you have access to.
 - **Auto-Merge**: Downloads separated video and audio streams natively and merges them losslessly into a final `.mp4`.
 
 ---
@@ -21,8 +20,8 @@ If you are using the compiled binary (`download_drive_file.exe`), you **do not n
 
 ### Prerequisites
 1. **Operating System**: Windows 10/11 (64-bit).
-2. **Browser**: Microsoft Edge (built-in) or Google Chrome.
-3. **Google Account**: Ensure you are logged into Google in your browser so the tool can access the file.
+2. **Browser**: Google Chrome.
+3. **Google Account**: You need to login to Google Account to Access the video.
 
 ### How to Run
 
@@ -31,9 +30,9 @@ If you are using the compiled binary (`download_drive_file.exe`), you **do not n
    ```cmd
    cd path\to\dist
    ```
-3. Run the executable with your Google Drive video URL:
+3. Run the executable with your Google Drive video or Folder URL:
    ```cmd
-   download_drive_file.exe "YOUR_GOOGLE_DRIVE_VIDEO_URL"
+   download_drive_file.exe "YOUR_GOOGLE_DRIVE_VIDEO_URL_OR_FOLDER_URL"
    ```
 
 **Example:**
@@ -51,18 +50,17 @@ If you want to compile the project yourself into a standalone `.exe`:
 
 ### 1. Prerequisites
 - **Python 3.8+** installed ([python.org](https://www.python.org/)) with **"Add Python to PATH"** checked.
-- Place `ffmpeg.exe` in the root folder of the project.
 
-### 2. Install Build Dependencies
+### 2. Install Dependencies
 ```cmd
-pip install playwright pyinstaller
+pip install -r requirements.txt
 playwright install chromium
 ```
 
 ### 3. Build with PyInstaller
 Run the build using the provided `.spec` file:
 ```cmd
-pyinstaller download_drive_file.spec
+pyinstaller --onefile --add-binary "ffmpeg.exe;." --collect-all playwright download_drive_file.py
 ```
 
 Once the build finishes, your standalone executable will be generated at:
@@ -78,18 +76,21 @@ If you prefer running directly from source code without compiling:
 
 ### Windows Setup
 
-1. **Install Dependencies:**
-   ```cmd
-   pip install playwright
+1. **Create and Activate Virtual Environment (Optional but recommended):**
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   ```
+
+2. **Install Dependencies:**
+   ```powershell
+   pip install -r requirements.txt
    playwright install chromium
    ```
 
-2. **Ensure ffmpeg is available:**
-   - Either place `ffmpeg.exe` in the project root directory, or add `ffmpeg` to your system PATH.
-
 3. **Run the script:**
    ```cmd
-   python download_drive_file.py "YOUR_GOOGLE_DRIVE_VIDEO_URL"
+   python download_drive_file.py "YOUR_GOOGLE_DRIVE_VIDEO_URL_OR_FOLDER_URL"
    ```
 
 ### Linux (Ubuntu) Setup
@@ -126,25 +127,13 @@ You can customize the downloader using optional command-line flags:
 | Flag | Description | Default |
 |------|-------------|---------|
 | `url` | *(Required)* The Google Drive video file link | - |
-| `--browser` | Specify browser engine (`msedge` or `chrome`) | `msedge` (Windows) / `chrome` (Linux) |
 | `--download-dir` | Directory to save the final video | `./downloads` |
-| `--profile-dir` | Custom path to browser user profile | Auto-detected system profile path |
 
 ### Examples with Options
 
 - **Specify download folder:**
   ```cmd
   download_drive_file.exe "YOUR_URL" --download-dir "D:\MyVideos"
-  ```
-
-- **Use Google Chrome instead of Edge:**
-  ```cmd
-  download_drive_file.exe "YOUR_URL" --browser chrome
-  ```
-
-- **Use custom browser profile directory:**
-  ```cmd
-  download_drive_file.exe "YOUR_URL" --profile-dir "C:\Users\username\AppData\Local\Google\Chrome\User Data"
   ```
 
 ---
@@ -157,3 +146,8 @@ You can customize the downloader using optional command-line flags:
   Ensure you are logged into the Google Account that has view/download permissions for the target file in your selected browser.
 - **Temporary Files:**
   The separate `video.mp4` and `audio.mp4` streams are downloaded temporarily and automatically merged and cleaned up after creating `final_video.mp4`.
+  
+## ❕ Note
+- This only works with **Google Chrome**
+- This project is done for learning purpose. The developer doesn't have any responsibility if this is misused.
+- This program won't be have any regular update & won't be sure it works with future version of Google Chrome. We used Google Chrome 152.0.7977.65 for Windows.

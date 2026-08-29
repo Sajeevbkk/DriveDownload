@@ -1,362 +1,399 @@
 import asyncio
-import time
-import urllib.parse
-import urllib.request
-import shutil
-import subprocess
 import os
+import argparse
 import sys
 import platform
-import argparse
+import subprocess
+import urllib.parse
+import re
+import time
 from playwright.async_api import async_playwright
 
-if sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
-
 def get_ffmpeg_path():
-    """Gets the path to ffmpeg, preferring the PyInstaller bundled version if available."""
-    # If running as a PyInstaller bundle, look in the extracted _MEIPASS directory
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        bundled_ffmpeg = os.path.join(sys._MEIPASS, 'ffmpeg.exe')
-        if os.path.exists(bundled_ffmpeg):
-            return bundled_ffmpeg
-            
-    # Otherwise, fall back to checking the system's PATH
-    return shutil.which("ffmpeg")
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return "ffmpeg"
+    except FileNotFoundError:
+        return None
 
-def force_close_browser(browser_channel):
-    """Kills all background browser processes so Playwright can safely access the profile."""
-    print(f"Ensuring all {browser_channel} processes are closed...")
+def force_close_browser():
     try:
         if platform.system() == "Windows":
-            if browser_channel == "msedge":
-                subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            if browser_channel == "msedge":
-                subprocess.run(["pkill", "-f", "msedge"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                subprocess.run(["pkill", "-f", "chrome"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Give it a second to clean up process locks
-        import time
+            subprocess.run(["pkill", "-f", "chrome"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1)
-    except Exception as error:
-        sys.stderr.write(f"{error}\n")
+    except Exception:
+        pass
 
-async def get_video_urls_and_cookies(file_url, user_data_dir, browser_channel):
-    force_close_browser(browser_channel)
-    print(f"Launching {browser_channel} to capture URLs...")
+def prepare_persistent_profile():
+    persistent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
+    if os.path.exists(os.path.join(persistent_dir, "Default", "Network", "Cookies")):
+        return persistent_dir
+    os.makedirs(persistent_dir, exist_ok=True)
+    return persistent_dir
+
+async def extract_folder_items(page, folder_url):
+    print(f"📂 Navigating to folder: {folder_url}")
+    await page.goto(folder_url, wait_until="domcontentloaded", timeout=60000)
+    print("⏳ Waiting for folder contents to load (please log in if asked)...")
+    await asyncio.sleep(5)
+    
+    if "Sign-in" in await page.title() or "accounts.google.com" in page.url:
+        print("\n⚠️ Google Sign-In required!")
+        for _ in range(120):
+            await asyncio.sleep(1)
+            if "accounts.google.com" not in page.url:
+                print("✅ Login detected! Continuing...")
+                await asyncio.sleep(5)
+                break
+                
+    print("📜 Scrolling to discover all files in the folder...")
+    for _ in range(8):
+        await page.mouse.wheel(0, 5000)
+        await asyncio.sleep(1)
+        
+    files = await page.evaluate(r'''() => {
+        let results = [];
+        let links = document.querySelectorAll('a[href*="/file/d/"]');
+        for (let a of links) {
+            let match = a.href.match(/\/file\/d\/([^/]+)/);
+            if (match) {
+                let name = a.innerText || a.getAttribute('aria-label') || "Unknown";
+                results.push({id: match[1], name: name.replace(/\n/g, ' ').trim()});
+            }
+        }
+        if (results.length === 0) {
+            let elements = document.querySelectorAll('[data-id]');
+            for (let el of elements) {
+                let id = el.getAttribute('data-id');
+                if (id && id.length >= 28 && id.length <= 35) {
+                    let name = el.innerText || el.getAttribute('aria-label') || id;
+                    results.push({id: id, name: name.split('\n')[0].trim()});
+                }
+            }
+        }
+        let unique = [];
+        let seen = new Set();
+        for (let item of results) {
+            if (!seen.has(item.id)) {
+                seen.add(item.id);
+                unique.push(item);
+            }
+        }
+        return unique;
+    }''')
+    
+    print(f"✅ Found {len(files)} items in folder.")
+    return files
+
+async def extract_video_streams(context, file_id, file_name):
+    print(f"\n🎬 Processing: {file_name}")
+    page = await context.new_page()
+    await page.bring_to_front()
+    
     captured_urls = {}
     
-    # Adjust user agent slightly based on browser to blend in
-    if browser_channel == "msedge":
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edge/120.0.0.0"
-    else:
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    
-    async with async_playwright() as p:
-        try:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                channel=browser_channel,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                user_agent=user_agent
-            )
-            print("Launching browser...")
-        except Exception as e:
-            print(f"❌ Failed to launch browser: {e}")
-            print(f"Please check if {browser_channel} is installed and the profile directory '{user_data_dir}' is valid and accessible.")
-            return None, None, None
+    def handle_request(request):
+        url = request.url
+        if "videoplayback" in url:
+            decoded_url = urllib.parse.unquote(url)
+            is_video = "mime=video" in decoded_url
+            is_audio = "mime=audio" in decoded_url
             
-        page = await context.new_page()
+            full_url = re.sub(r'&range=[^&]*', '', url)
+            full_url = re.sub(r'\?range=[^&]*&', '?', full_url)
+            full_url = re.sub(r'\?range=[^&]*$', '', full_url)
+            for param in ['alr', 'rn', 'rbuf', 'ump']:
+                full_url = re.sub(rf'&{param}=[^&]*', '', full_url)
+                full_url = re.sub(rf'\?{param}=[^&]*&', '?', full_url)
+                full_url = re.sub(rf'\?{param}=[^&]*$', '', full_url)
+            
+            if is_video:
+                captured_urls["video"] = full_url
+            elif is_audio:
+                captured_urls["audio"] = full_url
 
-        def handle_request(request):
-            url = request.url
-            if "videoplayback" in url:
-                decoded_url = urllib.parse.unquote(url)
-                is_video = "mime=video" in decoded_url
-                is_audio = "mime=audio" in decoded_url
+    page.on("request", handle_request)
+    
+    file_url = f"https://drive.google.com/file/d/{file_id}/view"
+    await page.goto(file_url, wait_until="domcontentloaded")
+    
+    if "Sign-in" in await page.title() or "accounts.google.com" in page.url:
+        print("⚠️ Waiting for login...")
+        for _ in range(60):
+            await asyncio.sleep(1)
+            if "accounts.google.com" not in page.url:
+                break
                 
-                import re
-                # Google Drive URLs are cryptographically signed. Using urlparse breaks the signature!
-                # We must use regex to cleanly remove ONLY the range parameter.
-                full_url = re.sub(r'&range=[^&]*', '', url)
-                full_url = re.sub(r'\?range=[^&]*&', '?', full_url)
-                full_url = re.sub(r'\?range=[^&]*$', '', full_url)
-                
-                # Also remove chunking parameters so we get a raw video file instead of a protobuf stream
-                for param in ['alr', 'rn', 'rbuf', 'ump']:
-                    full_url = re.sub(rf'&{param}=[^&]*', '', full_url)
-                    full_url = re.sub(rf'\?{param}=[^&]*&', '?', full_url)
-                    full_url = re.sub(rf'\?{param}=[^&]*$', '', full_url)
-                
-                # Overwrite with the latest requested URLs 
-                # (so we get the 1080p ones after switching quality)
-                if is_video:
-                    captured_urls["video"] = full_url
-                elif is_audio:
-                    captured_urls["audio"] = full_url
-                    
-        page.on("request", handle_request)
-        
-        print(f"Navigating to {file_url}...")
-        await page.goto(file_url)
-        
-        print("Waiting for the page to settle...")
-        await asyncio.sleep(5) 
-        
-        print("Searching for the video player inside iframes...")
-        player_frame = None
-        
-        # Drive embeds the video in an iframe, so we must search across all frames
+    print("🔍 Waiting for Drive player UI to load (this can take a few seconds)...")
+    
+    try:
+        drive_play = page.locator('div[role="button"][aria-label="Play"], button[aria-label="Play"], div[aria-label="Play"]').first
+        await drive_play.wait_for(state="visible", timeout=15000)
+        print("▶️ Found Drive Play button. Clicking...")
+        await drive_play.click(force=True)
+    except Exception:
+        print("⚠️ No Drive Play button found. Blind clicking center of screen...")
+        if page.viewport_size:
+            await page.mouse.click(page.viewport_size['width'] / 2, page.viewport_size['height'] / 2)
+            
+    print("🔍 Waiting for YouTube iframe to initialize...")
+    player_frame = None
+    for _ in range(20):
         for frame in page.frames:
             try:
-                # The giant play button in the center
-                play_btn = frame.locator(".ytp-large-play-button").first
-                if await play_btn.is_visible():
-                    print("✅ Found the video player! Clicking Play...")
-                    await play_btn.click()
+                video_el = frame.locator("video").first
+                if await video_el.is_visible(timeout=500):
                     player_frame = frame
                     break
             except Exception:
                 continue
-                
-        # Fallback to clicking center of the screen if we couldn't find the play button
-        if not player_frame:
-            print("⚠️ Could not find the Play button. Clicking the center of the screen as a fallback...")
-            if page.viewport_size:
-                await page.mouse.click(page.viewport_size['width'] / 2, page.viewport_size['height'] / 2)
-            
-        await asyncio.sleep(3)
+        if player_frame:
+            break
+        await asyncio.sleep(1)
         
+    if player_frame:
+        print("✅ Found YouTube video frame!")
         try:
-            print("Searching for quality settings inside the player...")
-            
-            # If we didn't identify the frame earlier, try finding it via the settings button
-            if not player_frame:
-                for frame in page.frames:
-                    try:
-                        btn = frame.locator(".ytp-settings-button").first
-                        if await btn.is_visible():
-                            player_frame = frame
-                            break
-                    except Exception:
-                        continue
-            
-            if player_frame:
-                settings_btn = player_frame.locator(".ytp-settings-button").first
-                if await settings_btn.is_visible():
-                    print("Opening player settings...")
-                    await settings_btn.click()
-                    await asyncio.sleep(1)
-                    
-                    print("Clicking Quality menu...")
-                    quality_item = player_frame.locator('.ytp-menuitem:has-text("Quality"), .ytp-menuitem:has-text("Auto"), .ytp-menuitem:has-text("1080p"), .ytp-menuitem:has-text("720p")').first
-                    if await quality_item.is_visible():
-                        await quality_item.click()
-                        await asyncio.sleep(1)
-                        
-                        print("Attempting to select the highest available quality...")
-                        qualities_to_try = ["1080p", "720p", "480p", "360p", "240p", "144p"]
-                        quality_selected = False
-                        
-                        for q in qualities_to_try:
-                            q_item = player_frame.locator(f'.ytp-menuitem:has-text("{q}")').first
-                            if await q_item.is_visible():
-                                await q_item.click()
-                                print(f"✅ {q} selected! Capturing new stream URLs...")
-                                quality_selected = True
-                                break
-                                
-                        if not quality_selected:
-                            print("⚠️ Could not find a specific quality option. Leaving at default/Auto.")
-                            await page.mouse.click(10, 10) # close the menu
-                    else:
-                        print("Could not find the Quality option in settings.")
-                        await page.mouse.click(10, 10)
-                else:
-                    print("Could not find the settings gear icon. Video might not support quality selection.")
+            play_btn = player_frame.locator(".ytp-large-play-button").first
+            if await play_btn.is_visible(timeout=2000):
+                print("▶️ Clicking YouTube play button...")
+                await play_btn.click(force=True)
             else:
-                print("Could not locate the player frame.")
+                print("▶️ Forcing video playback via JavaScript...")
+                await player_frame.locator("video").first.evaluate("el => el.play()")
+        except Exception as e:
+            print(f"⚠️ Playback force failed: {e}")
+    else:
+        print("❌ Could not find the video frame. The video might still be processing on Google Drive.")
+    
+    if player_frame:
+        print("⚙️ Forcing highest quality...")
+        try:
+            # 1. Wake up the player UI in case it auto-hid
+            await player_frame.evaluate("() => { const p = document.querySelector('.html5-video-player'); if(p) p.classList.remove('ytp-autohide'); }")
+            await asyncio.sleep(1)
+            
+            # 2. Click Settings gear via JS directly
+            clicked_settings = await player_frame.evaluate('''() => {
+                let btn = document.querySelector('.ytp-settings-button');
+                if(btn) { btn.click(); return true; }
+                return false;
+            }''')
+            
+            if clicked_settings:
+                print("⚙️ Opened settings menu...")
+                await asyncio.sleep(1) # wait for animation
+                
+                # 3. Click Quality menu item via JS
+                clicked_quality = await player_frame.evaluate(r'''() => {
+                    let items = Array.from(document.querySelectorAll('.ytp-menuitem'));
+                    let qItem = items.find(i => {
+                        let text = i.innerText || i.textContent || "";
+                        return text.includes('Quality') || /\d+p/.test(text);
+                    });
+                    if(qItem) { qItem.click(); return true; }
+                    return false;
+                }''')
+                
+                if clicked_quality:
+                    print("⚙️ Opened quality submenu...")
+                    await asyncio.sleep(1) # wait for animation
+                    
+                    # Clear out the old low-quality streams BEFORE we click the highest quality
+                    captured_urls.clear()
+                    print("🔄 Cleared initial low-quality streams...")
+                    
+                    # 4. Click highest quality option (top item in list) via JS
+                    selected_highest = await player_frame.evaluate('''() => {
+                        let opts = document.querySelectorAll('.ytp-quality-menu .ytp-menuitem');
+                        if(opts.length > 0) {
+                            opts[0].click();
+                            return true;
+                        }
+                        return false;
+                    }''')
+                    
+                    if selected_highest:
+                        print("✅ Selected top quality option!")
+                    else:
+                        print("⚠️ Could not find quality options to select.")
+                else:
+                    print("⚠️ Could not find 'Quality' menu item.")
+            else:
+                print("⚠️ Could not find Settings gear button in DOM.")
                 
         except Exception as e:
-            print(f"UI interaction failed: {e}")
-            print("Feel free to manually change quality in the browser window!")
-
-        print("\nWaiting 10 seconds to collect the latest network requests...")
-        await asyncio.sleep(10)
+            print(f"⚠️ Notice: Quality UI interaction failed (leaving at default quality): {e}")
+            
+    print("⏳ Waiting for stream URLs...")
+    for _ in range(20):
+        if "video" in captured_urls and "audio" in captured_urls:
+            print("✅ Captured highest quality streams!")
+            await asyncio.sleep(2)
+            break
+        await asyncio.sleep(1)
         
-        # Extract cookies so we can download the files outside the browser
-        cookies = await context.cookies()
-        
-        await context.close()
-        
-    return captured_urls, cookies, user_agent
-
-async def main():
-    parser = argparse.ArgumentParser(description="Download Google Drive video in highest quality.")
-    parser.add_argument("url", metavar="drive url", nargs=1, help="Google Drive File URL")
-    parser.add_argument("--profile-dir", help="Path to browser profile directory (optional)")
-    parser.add_argument("--browser", choices=["msedge", "chrome"], help="Browser to use (msedge or chrome) (optional)")
-    parser.add_argument("--download-dir", default="./downloads", help="Directory to save downloads")
-    args = parser.parse_args()
-
-    DRIVE_FILE_URL = args.url[0]
-    DOWNLOAD_DIR = args.download_dir
-    browser_channel = args.browser
-    profile_dir = args.profile_dir
-
-    if not browser_channel:
-        if platform.system() == "Windows":
-            browser_channel = "msedge"
-        else:
-            browser_channel = "chrome"
-
-    if not profile_dir:
-        if platform.system() == "Windows":
-             if browser_channel == "msedge":
-                 profile_dir = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data")
-             else:
-                 profile_dir = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
-        elif platform.system() == "Linux":
-             if browser_channel == "msedge":
-                 profile_dir = os.path.expanduser("~/.config/microsoft-edge")
-             else:
-                 profile_dir = os.path.expanduser("~/.config/google-chrome")
-        elif platform.system() == "Darwin":
-             if browser_channel == "msedge":
-                 profile_dir = os.path.expanduser("~/Library/Application Support/Microsoft Edge")
-             else:
-                 profile_dir = os.path.expanduser("~/Library/Application Support/Google/Chrome")
-
-    print(f"Configuration:")
-    print(f"URL: {DRIVE_FILE_URL}")
-    print(f"Browser: {browser_channel}")
-    print(f"Profile Directory: {profile_dir}")
-    print(f"Download Directory: {DOWNLOAD_DIR}")
+    await page.close()
     
-    ffmpeg_path = get_ffmpeg_path()
-    if not ffmpeg_path:
-        print("\n⚠️  WARNING: ffmpeg not found!")
-        print("Merging audio and video will not be possible without ffmpeg.")
-        print("Please ensure ffmpeg is bundled or installed if you need audio and video merged.")
-        time.sleep(3)
-    
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    
-    # 1. Capture the URLs and Cookies using Playwright
-    urls, cookies, user_agent = await get_video_urls_and_cookies(DRIVE_FILE_URL, profile_dir, browser_channel)
-    
-    if urls is None:
-        return
-        
-    print("\n✅ URLs captured!")
-    if not urls:
-        print("⚠️ No URLs were intercepted! The video might not have played.")
-        return
+    if "video" in captured_urls and "audio" in captured_urls:
+        return {
+            "id": file_id,
+            "name": file_name,
+            "video_url": captured_urls["video"],
+            "audio_url": captured_urls["audio"]
+        }
     else:
-        for t, u in urls.items():
-            print(f"{t.upper()} URL: {u[:100]}...")
-            
-    video_temp = os.path.join(DOWNLOAD_DIR, "video.mp4")
-    audio_temp = os.path.join(DOWNLOAD_DIR, "audio.mp4")
-    final_output = os.path.join(DOWNLOAD_DIR, "final_video.mp4")
-            
-    # 2. Use the browser to natively download the extracted URLs
-    print("\nStarting browser-native downloads...")
-    async with async_playwright() as p:
-        # Re-attach to the browser
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            channel=browser_channel,
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-            user_agent=user_agent
-        )
+        print(f"❌ Failed to capture streams for {file_name}. (Might not be a video)")
+        return None
+
+async def download_file(context, item, download_dir, user_agent):
+    file_id = item["id"]
+    file_name = "".join(c for c in item["name"] if c.isalnum() or c in " ._-").strip()
+    if not file_name:
+        file_name = file_id
         
-        for stream_type, url in urls.items():
-            print(f"\nOpening new tab to download {stream_type}...")
-            new_page = await context.new_page()
-            
-            # Navigate to the video stream's exact origin so the browser allows the 'download' attribute
-            parsed_url = urllib.parse.urlparse(url)
-            origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            
-            # Mock the origin page to ensure instant, reliable navigation to the correct domain
-            async def mock_origin(route):
-                if route.request.url in [origin, origin + "/"]:
-                    await route.fulfill(status=200, body="<html><body>Download ready</body></html>", content_type="text/html")
-                else:
-                    await route.continue_()
-                
-            await new_page.route("**/*", mock_origin)
-            try:
-                await new_page.goto(origin)
-            except Exception:
-                pass
-                
-            print(f"Triggering {stream_type} download...")
-            try:
-                async with new_page.expect_download(timeout=300000) as download_info:
-                    await new_page.evaluate(f'''() => {{
-                        const a = document.createElement('a');
-                        a.href = "{url}";
-                        a.download = "{stream_type}.mp4";
-                        document.body.appendChild(a);
-                        a.click();
-                    }}''')
-                
-                download = await download_info.value
-                out_path = video_temp if stream_type == "video" else audio_temp
-                await download.save_as(out_path)
-                print(f"✅ Saved {stream_type} to {out_path}")
-            except Exception as e:
-                print(f"❌ Failed to download {stream_type}: {e}")
-                
-            await new_page.close()
-            
-        await context.close()
+    print(f"\n⬇️ Starting background download for: {file_name}")
+    
+    video_path = os.path.join(download_dir, f"temp_v_{file_id}.mp4")
+    audio_path = os.path.join(download_dir, f"temp_a_{file_id}.mp4")
+    final_path = os.path.join(download_dir, f"{file_name}.mp4")
+    
+    if os.path.exists(final_path):
+        print(f"⏭️ Skipping {file_name} (already downloaded)")
+        return
         
-    # 3. Merge them using ffmpeg
-    if "video" in urls and "audio" in urls:
-        if os.path.exists(video_temp) and os.path.exists(audio_temp):
-            if not ffmpeg_path:
-                print("\n❌ ffmpeg is not installed or bundled. Both video and audio downloaded but cannot merge.")
-                print(f"Video file: {video_temp}")
-                print(f"Audio file: {audio_temp}")
-                return
+    # Extract cookies to use natively in Python, avoiding browser UI glitches
+    cookies = await context.cookies()
+    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+    
+    import shutil
+    import urllib.request
+    
+    def stream_download_sync(url, out_path):
+        req = urllib.request.Request(url, headers={
+            "Cookie": cookie_str,
+            "User-Agent": user_agent,
+            "Referer": "https://drive.google.com/"
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response, open(out_path, 'wb') as out_file:
+                # Download in chunks directly to disk
+                shutil.copyfileobj(response, out_file, length=1024*1024)
+            return True
+        except Exception as e:
+            print(f"❌ HTTP Download error: {e}")
+            return False
             
-            print("\nMerging video and audio with ffmpeg...")
+    async def run_download(stream_type, url, out_path):
+        success = await asyncio.to_thread(stream_download_sync, url, out_path)
+        if success:
+            print(f"✅ Downloaded {stream_type} for {file_name}")
+        else:
+            print(f"❌ Failed {stream_type} download for {file_name}")
+            
+    await asyncio.gather(
+        run_download("video", item["video_url"], video_path),
+        run_download("audio", item["audio_url"], audio_path)
+    )
+    
+    if os.path.exists(video_path) and os.path.exists(audio_path):
+        ffmpeg_path = get_ffmpeg_path()
+        if ffmpeg_path:
+            print(f"🔄 Merging audio/video for {file_name}...")
             try:
                 subprocess.run([
                     ffmpeg_path, "-y",
-                    "-i", video_temp,
-                    "-i", audio_temp,
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    final_output
-                ], check=True)
-                
-                print("\nCleaning up temporary files...")
-                os.remove(video_temp)
-                os.remove(audio_temp)
-                print(f"🎉 All done! Final video saved to {final_output}")
-            except subprocess.CalledProcessError as e:
-                print(f"\n❌ Error merging with ffmpeg: {e}")
+                    "-i", video_path, "-i", audio_path,
+                    "-c:v", "copy", "-c:a", "aac",
+                    final_path
+                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                os.remove(video_path)
+                os.remove(audio_path)
+                print(f"🎉 Successfully saved: {final_path}")
+            except Exception as e:
+                print(f"❌ FFmpeg error on {file_name}: {e}")
         else:
-            print("\n❌ Missing audio or video file, cannot merge.")
-    elif "video" in urls:
-        if os.path.exists(video_temp):
-            print("\nOnly video stream was downloaded. Moving to final output...")
-            shutil.move(video_temp, final_output)
-            print(f"🎉 All done! Final video saved to {final_output}")
-    elif "audio" in urls:
-        if os.path.exists(audio_temp):
-            print("\nOnly audio stream was downloaded. Moving to final output...")
-            shutil.move(audio_temp, final_output)
-            print(f"🎉 All done! Final audio saved to {final_output}")
+            print(f"⚠️ FFmpeg missing! Kept temporary files for {file_name}")
+
+async def main():
+    parser = argparse.ArgumentParser(description="Google Drive Folder/File Downloader")
+    parser.add_argument("url", help="Google Drive Folder or File URL")
+    parser.add_argument("--download-dir", default="./downloads", help="Directory to save downloads")
+    args = parser.parse_args()
+
+    url = args.url
+    download_dir = args.download_dir
+    os.makedirs(download_dir, exist_ok=True)
+    
+    print("Force closing background Chrome...")
+    force_close_browser()
+    
+    persistent_profile = prepare_persistent_profile()
+    
+    print(f"Launching Chrome with isolated automation profile...")
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=persistent_profile,
+            channel="chrome",
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+            ignore_default_args=["--enable-automation"],
+            user_agent=user_agent
+        )
+        
+        main_page = context.pages[0] if context.pages else await context.new_page()
+        
+        items_to_process = []
+        
+        if "/folders/" in url or "drive/u/" in url:
+            items = await extract_folder_items(main_page, url)
+            for item in items:
+                items_to_process.append(item)
+        else:
+            match = re.search(r'/file/d/([^/]+)', url)
+            file_id = match.group(1) if match else "unknown_file"
+            # Use the unique file_id as the name to prevent naming collisions for single links
+            items_to_process.append({"id": file_id, "name": file_id})
+            
+        print(f"\n🎯 Found {len(items_to_process)} items. Checking download status...")
+        
+        pending_items = []
+        for item in items_to_process:
+            file_id = item["id"]
+            file_name = "".join(c for c in item["name"] if c.isalnum() or c in " ._-").strip()
+            if not file_name:
+                file_name = file_id
+            final_path = os.path.join(download_dir, f"{file_name}.mp4")
+            
+            if os.path.exists(final_path):
+                print(f"⏭️ Skipping '{file_name}' (already fully downloaded)")
+            else:
+                pending_items.append(item)
+                
+        if not pending_items:
+            print("\n✅ All videos have already been downloaded!")
+            await context.close()
+            return
+            
+        print(f"\n🚀 Starting stream extraction phase for {len(pending_items)} pending video(s)...")
+        
+        stream_data = []
+        for item in pending_items:
+            data = await extract_video_streams(context, item["id"], item["name"])
+            if data:
+                stream_data.append(data)
+                
+        print(f"\n🚀 Extracted metadata for {len(stream_data)} videos. Starting parallel downloads...")
+        
+        download_tasks = [download_file(context, data, download_dir, user_agent) for data in stream_data]
+        await asyncio.gather(*download_tasks)
+        
+        print("\n✅ All operations completed!")
+        await context.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
