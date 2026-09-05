@@ -171,58 +171,44 @@ async def extract_video_streams(context, file_id, file_name):
     if player_frame:
         print("⚙️ Forcing highest quality...")
         try:
-            # 1. Wake up the player UI in case it auto-hid
-            await player_frame.evaluate("() => { const p = document.querySelector('.html5-video-player'); if(p) p.classList.remove('ytp-autohide'); }")
-            await asyncio.sleep(1)
-            
-            # 2. Click Settings gear via JS directly
-            clicked_settings = await player_frame.evaluate('''() => {
-                let btn = document.querySelector('.ytp-settings-button');
-                if(btn) { btn.click(); return true; }
-                return false;
-            }''')
-            
-            if clicked_settings:
-                print("⚙️ Opened settings menu...")
-                await asyncio.sleep(1) # wait for animation
+            settings_btn = player_frame.locator(".ytp-settings-button").first
+            if await settings_btn.is_visible():
+                print("⚙️ Opening player settings...")
+                await settings_btn.click(force=True)
+                await asyncio.sleep(1)
                 
-                # 3. Click Quality menu item via JS
-                clicked_quality = await player_frame.evaluate(r'''() => {
-                    let items = Array.from(document.querySelectorAll('.ytp-menuitem'));
-                    let qItem = items.find(i => {
-                        let text = i.innerText || i.textContent || "";
-                        return text.includes('Quality') || /\d+p/.test(text);
-                    });
-                    if(qItem) { qItem.click(); return true; }
-                    return false;
-                }''')
-                
-                if clicked_quality:
-                    print("⚙️ Opened quality submenu...")
-                    await asyncio.sleep(1) # wait for animation
+                print("⚙️ Clicking Quality menu...")
+                quality_item = player_frame.locator('.ytp-menuitem:has-text("Quality"), .ytp-menuitem:has-text("Auto"), .ytp-menuitem:has-text("1080p"), .ytp-menuitem:has-text("720p")').first
+                if await quality_item.is_visible():
+                    await quality_item.click(force=True)
+                    await asyncio.sleep(1)
                     
                     # Clear out the old low-quality streams BEFORE we click the highest quality
                     captured_urls.clear()
                     print("🔄 Cleared initial low-quality streams...")
                     
-                    # 4. Click highest quality option (top item in list) via JS
-                    selected_highest = await player_frame.evaluate('''() => {
-                        let opts = document.querySelectorAll('.ytp-quality-menu .ytp-menuitem');
-                        if(opts.length > 0) {
-                            opts[0].click();
-                            return true;
-                        }
-                        return false;
-                    }''')
+                    print("⚙️ Attempting to select the highest available quality...")
+                    qualities_to_try = ["1080p", "720p", "480p", "360p", "240p", "144p"]
+                    quality_selected = False
                     
-                    if selected_highest:
-                        print("✅ Selected top quality option!")
-                    else:
-                        print("⚠️ Could not find quality options to select.")
+                    for q in qualities_to_try:
+                        q_item = player_frame.locator(f'.ytp-menuitem:has-text("{q}")').first
+                        if await q_item.is_visible():
+                            await q_item.click(force=True)
+                            print(f"✅ {q} selected! Capturing new stream URLs...")
+                            quality_selected = True
+                            break
+                            
+                    if not quality_selected:
+                        print("⚠️ Could not find a specific quality option. Leaving at default/Auto.")
+                        if page.viewport_size:
+                            await page.mouse.click(10, 10)
                 else:
-                    print("⚠️ Could not find 'Quality' menu item.")
+                    print("⚠️ Could not find the Quality option in settings.")
+                    if page.viewport_size:
+                        await page.mouse.click(10, 10)
             else:
-                print("⚠️ Could not find Settings gear button in DOM.")
+                print("⚠️ Could not find the settings gear icon in DOM.")
                 
         except Exception as e:
             print(f"⚠️ Notice: Quality UI interaction failed (leaving at default quality): {e}")
